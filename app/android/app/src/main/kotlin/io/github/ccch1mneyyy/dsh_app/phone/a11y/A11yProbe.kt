@@ -29,6 +29,7 @@ import java.util.concurrent.Executors
  *   am broadcast -a io.github.ccch1mneyyy.dsh_app.A11Y_PROBE --es cmd screen [--ez image true] [--ez detail true] --ei seq 1
  *   cmd: screen | target sid id | tap sid id [long] | type sid id text [submit] | scroll sid [id] dir |
  *        key back|home|recents|notifications | tapxy sid x y | open pkg | collect sid id [pages] [until] |
+ *        readcompat [--es set on|off] (本 fork 的宽松读屏开关，缺省查询状态) |
  *        fg | windows | status [text] | confirm sentence [app] [first] | handoff reason [ms] | injecttest [relax] | guard |
  *        begin (a task starts, as on a tool call) | finish [session] [host] [reopen] (what Dart's finishTask does) |
  *        overlay [opacity 0.3–1] [auto true|false] (the 悬浮条 settings, as the settings page writes them) |
@@ -110,6 +111,8 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
                 "confirm" -> overlay.confirm(ConfirmRequest(a.s("sentence") ?: AppStrings.get(service, R.string.overlay_probe_confirm), a.s("app"), null, a.b("first"), (a.i("ms") ?: 30_000).toLong())).name
                 "handoff" -> overlay.handoff(a.s("reason") ?: AppStrings.get(service, R.string.overlay_probe_password), (a.i("ms") ?: 60_000).toLong()).name
                 "injecttest" -> injectTest(a.b("relax"))
+                // A-B 对照：切换本 fork 的宽松读屏开关（上游无此命令）。
+                "readcompat" -> ReadCompat.toggle(a.s("set"))
                 "guard" -> "lastGuardVerdict=${overlay.lastGuardVerdict}"
                 "task" -> PhoneControl.get(service).tasks.snapshot().toString()
                 "interrupt" -> {

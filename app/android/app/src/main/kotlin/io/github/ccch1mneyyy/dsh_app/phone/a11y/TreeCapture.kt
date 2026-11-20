@@ -194,9 +194,11 @@ internal object TreeCapture {
                 val node = convert(root, 0, st, refresh = false)
                 // Inspect the whole subtree, not just the root's child count. A chain of empty
                 // layouts is still unreadable; an unlabelled canvas is not evidence of filtering.
+                // Bug 防护：ReadCompat 开启时照常收录空壳窗口，但不再把它标成 unreadable。
+                // 保留 emptyFront 的 break 语义（不透过读不到的前景窗继续读），只放开标记。
                 val emptyFront = chosen.isEmpty() && w.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
                     !st.truncated && !WindowContent.usable(node)
-                if (emptyFront) unreadable = title ?: ""
+                if (emptyFront && !ReadCompat.relaxed) unreadable = title ?: ""
                 chosen += UiWindow(
                     w.id, if (w.type == AccessibilityWindowInfo.TYPE_SYSTEM) WindowKind.SYSTEM else WindowKind.APP,
                     pkg, title, bounds, node,
@@ -272,7 +274,9 @@ internal object TreeCapture {
 
     private fun convert(node: AccessibilityNodeInfo, depth: Int, st: State, refresh: Boolean = true): UiNode? {
         if (refresh) refreshTyped(node, st)
-        if (!node.isVisibleToUser) { release(node); return null }
+        // Bug 防护：OpenMinis 的 --visible-only=false 证明部分内容挂在不可见节点上。
+        // ReadCompat 开启时保留这些节点，交给上层格式化，不改变节点自身的坐标/动作语义。
+        if (!node.isVisibleToUser && !ReadCompat.relaxed) { release(node); return null }
         node.getBoundsInScreen(st.rect)
         val bounds = Box(st.rect.left, st.rect.top, st.rect.right, st.rect.bottom)
         val ref = st.natives.size
