@@ -260,7 +260,8 @@ internal class MainScreenDriver(private val service: PhoneA11yService, private v
         !cancelled(gen) && availability().ok && latest === snap && visual.scope(snap.id) != null &&
             Build.VERSION.SDK_INT >= 34 && cap.windows.size == 1 && cap.visualComplete &&
             cap.keyboardShown == false && !snap.ownApp && !snap.protectedPage && !snap.hidden &&
-            !cap.truncated && !cap.partial && !unavailable(cap) && secretFieldBounds(cap.windows).isEmpty() &&
+            !cap.truncated && !cap.partial && (ReadCompat.relaxed || !unavailable(cap)) &&
+            secretFieldBounds(cap.windows).isEmpty() &&
             PhoneControl.peek()?.policies()?.denyPackages?.let { snap.packageName != null && snap.packageName !in it } == true
 
     private fun verifyOcrContext(cap: Capture, snap: Snapshot, gen: Long, deadline: Long): Boolean {
