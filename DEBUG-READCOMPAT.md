@@ -23,6 +23,18 @@
 3. 关键区分：小程序页 `secure=false`，全屏截图 129KB 正常产出，所以不是 FLAG_SECURE 红线，可以走 OCR。
 4. **最终验证通过**（2026-11-21 16:26，京东小程序商品页）：`poor=true`、`image=122721B`，输出 61 条本机文字区域，包括「该商品已下架」「戴尔(DELL)笔记本电脑 游匣G15 15.6英寸」「游戏本(八核7 16G512G RTX3060显卡…」「¥6999.00」「相似商品」等。之前微信聊天页仍可读。
 
+### Minis 对照实验（2026-11-21 16:56，纠正之前的错误结论）
+- 用户实测 Minis AI 对话能完整读小程序。我查源码 + 真机对照，纠正两个错误推断：
+  1. 「窗口级缺失是无障碍 API 固有上限」错。Minis `MinisAccessibilityService.kt:121-132` 用的就是 getWindows()+rootInActiveWindow+节点 text，无 OCR/无 shell，API 和 DSH 一样。
+  2. 「差在 flagRequestTouchExplorationMode」错。我加了那个 flag 编译安装，`touchExplorationEnabled` 仍为 false、capabilities 不变，无效果；已撤销。
+- 真机三通道对照（京东小程序页，Minis 无障碍服务已开启并 bound）：
+  - DSH 无障碍 `A11yProbe windows`：`rootInActiveWindow=null`，只剩 2 个 type=3 系统窗口 → 无节点；
+  - shell `uiautomator dump`：`ERROR: null root node returned by UiTestAutomationBridge` → 无节点；
+  - 截图：`screencap` 2.1MB 原图、DSH `image=true` 136KB JPEG → 完好。
+- 关键事实：Minis 的无障碍服务开着也拿不到节点；`minis-browser-use` 是它自己 WebView 抓网页，不是读微信屏幕。系统提示词 `ChatViewModel.kt:16447` 教 agent 用 `android-shizuku-cli exec`（Shizuku 特权 shell，等价 adb shell）；用户手机 Shizuku 已授权 Minis（`API_V23 granted=true`）。
+- **真相**：Minis 读小程序靠的是「截图 → 视觉模型读图」，不是无障碍节点，也不是 Magic flag。我拿同一张截图给视觉模型读，完整准确读出「该商品已下架 / 戴尔游匣G15 15.6英寸 八核i7 16G 512G RTX3060 / ¥6999 / 相似商品…」；本地 ML Kit OCR 读成「8标压处理器 / 高刷的眼屏 / 京仓遠发」。差距在**读图模型质量**，不在读取通道。
+- 因此 DSH Go 侧的正确方向：保证 `screen image=true` 稳定返回截图给能看图的上层模型（我的 visualOnly 修复已做到），而不是继续死磕节点树或加 flag。
+
 ### 关闭弹窗后的验证（2026-11-21 16:36）
 - 之前 agent 没点进详情页，不是看不到，是 SafetyGate 把点商品卡片判成购买类操作（卡片带「立即购买」），两次确认都被取消。
 - 用 `adb shell input tap 1197 625` 点掉「该商品已下架」弹窗右侧关闭圈 → 弹窗消失，露出商品详情页。
