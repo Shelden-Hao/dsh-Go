@@ -23,6 +23,18 @@
 3. 关键区分：小程序页 `secure=false`，全屏截图 129KB 正常产出，所以不是 FLAG_SECURE 红线，可以走 OCR。
 4. **最终验证通过**（2026-11-21 16:26，京东小程序商品页）：`poor=true`、`image=122721B`，输出 61 条本机文字区域，包括「该商品已下架」「戴尔(DELL)笔记本电脑 游匣G15 15.6英寸」「游戏本(八核7 16G512G RTX3060显卡…」「¥6999.00」「相似商品」等。之前微信聊天页仍可读。
 
+### Minis 第一条对话的真实工具链（2026-11-21 17:00，从 App 内 161 条轨迹逐条读出，定案）
+用户让我看 Minis 第一条对话（`这台是什么机器`）。Minis 自己说「逐页截了 42 屏做了 OCR」。逐条翻它的工具轨迹，完整链路是：
+1. `Minis is using Browser` → `navigate` 打开小程序卡片，`minis://attachments/screenshots/a11y_*.png` 看截图；
+2. `android-a11y-cli ui screenshot --compact` → 无障碍截图（**注意是 screenshot，不是 ui dump/extract text**）；
+3. `Minis is using Shell` + `Editor` → 写 `capture.sh`（421 B）到 `/var/minis/workspace/g15/`，执行 `sh capture.sh` **批量滚动截图** 42 屏（shot_1..42.png）；
+4. `apk add --no-cache tesseract-ocr tesseract-ocr-data-chi_sim` → 在沙箱里装 **Tesseract 中文 OCR**（不是 DSH 的 ML Kit）；
+5. 逐张 `tesseract shot_N.png` → 拼成 `pages.txt`（398 行），`读取全部OCR文本`；
+6. 联网核对戴尔官方手册 + iFixit（M.2 双槽 / X8MY9 支架），`memory_write` 记结论。
+- 它还打印过 `android-a11y-cli` 的 help，说明试过/看过 a11y 读文本命令，但最终走的是 screenshot 路线。
+- **Minis 从来没有拿到小程序节点树**。它的优势是把「滚动截图 → 批量 OCR → 全页文本」做成了脚本自动化，42 屏全量采集；DSH 侧我做的 visualOnly 只解决「单屏截图 + 本地 OCR」，差距在**广度（自动滚动）和 OCR 质量（Tesseract chi_sim vs ML Kit）**，不在读取通道。
+- 可学的东西：给 DSH 的 `collect` 工具在 poorTree/visualOnly 页面改成「滚动 + 逐屏截图 + 文字拼接」，而不是按节点收集；必要时允许用 Tesseract 替代/补充 ML Kit。
+
 ### Minis 对照实验（2026-11-21 16:56，纠正之前的错误结论）
 - 用户实测 Minis AI 对话能完整读小程序。我查源码 + 真机对照，纠正两个错误推断：
   1. 「窗口级缺失是无障碍 API 固有上限」错。Minis `MinisAccessibilityService.kt:121-132` 用的就是 getWindows()+rootInActiveWindow+节点 text，无 OCR/无 shell，API 和 DSH 一样。
