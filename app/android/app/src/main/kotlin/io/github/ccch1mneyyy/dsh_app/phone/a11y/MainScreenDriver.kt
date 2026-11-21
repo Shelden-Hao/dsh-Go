@@ -805,6 +805,17 @@ internal class MainScreenDriver(private val service: PhoneA11yService, private v
             }
             // l10n:keep agent screen result
             if (snap.ownApp && !lifted.ownApp) return CollectResult(emptyList(), 0, "这是 DSH 自己的界面，不读取", null, rejection = CollectRejection.READ_REFUSED)
+            // ReadCompat: 小程序等自绘页没有节点树，编号必然找不到。这类页面改用
+            // "滚动 + 逐屏截图 OCR + 文本去重" 的收集路径（对标 Minis 的 capture.sh）。
+            // 只在确认是 visualOnly 时分流；普通空列表仍按原逻辑报 INVALID_TARGET。
+            if (snap.screen.element(listElementId) == null) {
+                val probe = capture()
+                try {
+                    if (ReadCompat.relaxed && probe.visualOnly && !cancelled(abortGen) && allowed()) {
+                        return collectVisual(maxPages, until, allowed, canRead, scrollSourcesAllowed, gen = abortGen)
+                    }
+                } finally { probe.recycle() }
+            }
             var el = snap.screen.element(listElementId)
                 // l10n:keep agent screen result
                 ?: return CollectResult(emptyList(), 0, "屏幕 $screenId 里没有编号 $listElementId", null, rejection = CollectRejection.INVALID_TARGET)
@@ -908,6 +919,99 @@ internal class MainScreenDriver(private val service: PhoneA11yService, private v
             return CollectResult(items.list(), read, stop,
                 if (!sourceDenied && !cancelled(gen) && allowed()) observeQuiet() else null, readPackages.toSet())
         }
+    }
+
+    /**
+     * ReadCompat: collect from a screen with no accessibility nodes (self-drawn mini apps).
+     * Mirrors Minis' capture.sh: screenshot each page, run local OCR, de-duplicate the plain
+     * text lines, then gesture-scroll. All the usual read / scroll / OCR / screenshot safety
+     * gates still apply; only the node-based list discovery is replaced.
+     */
+    private fun collectVisual(maxPages: Int, until: String?, allowed: () -> Boolean,
+                              canRead: (String?) -> Boolean, scrollSourcesAllowed: (Set<String>) -> Boolean,
+                              gen: Long): CollectResult {
+        val pages = maxPages.coerceIn(1, 30)
+        val wanted = until?.trim()?.takeIf { it.isNotEmpty() }
+        val deadline = SystemClock.uptimeMillis() + COLLECT_MS
+        val items = CollectedItems()
+        val readPackages = LinkedHashSet<String>()
+        var sourceDenied = false
+        // l10n:keep agent screen result
+        var stop = "未能读取这一屏"
+        var read = 0
+        var misses = 0
+        while (true) {
+            if (cancelled(gen) || !allowed()) { stop = "本任务已暂停或停止"; break } // l10n:keep agent result
+            val cap = capture()
+            try {
+                // ReadCompat visualOnly 页本来就没有窗口，unavailable() 恒真（它把空
+                // windows 也算不可用），不能用它判定；这里只看安全窗红线 hidden。
+                if (cap.hiddenWindowTitle != null) {
+                    // l10n:keep agent screen result
+                    stop = "这一屏读不到内容（可能受敏感视图策略限制）"
+                    break
+                }
+                if (!ReadCompat.relaxed || !cap.visualOnly) {
+                    // l10n:keep agent screen result
+                    stop = "这一屏又能读到节点了，请改用 collect 的列表编号"
+                    break
+                }
+                val epoch = localOcr.enabledEpoch()
+                if (epoch == null) {
+                    // l10n:keep agent screen result
+                    stop = "本机文字识别已关闭，无法逐屏收集"
+                    break
+                }
+                val snap = latest ?: break
+                if (!ocrAllowed(cap, snap, gen)) {
+                    // l10n:keep agent screen result
+                    stop = "本屏不满足本机识别的隐私边界，未收集"
+                    break
+                }
+                // No JPEG needed for text collection, but geometry/viewport must be present
+                // so Shot.visualText() can format; localText holds the plain OCR lines.
+                val left = deadline - SystemClock.uptimeMillis()
+                if (left < 900) { stop = "读屏用时过长，停止收集"; break } // l10n:keep agent result
+                val shot = shooter.shoot(null, cap.screen, emptyList(), emptyList(),
+                    minOf(2_500L, left - 300), image = false, readLocalText = true,
+                    localTextPrivacyAllowed = ocrAllowed(cap, snap, gen),
+                    localTextCancelled = { !ocrAllowed(cap, snap, gen) || localOcr.enabledEpoch() != epoch })
+                val lines = (shot.localText as? LocalOcrResult.Recognized)?.lines?.map { it.text }.orEmpty()
+                val page = items.readPage(lines, wanted, cap.truncated || cap.partial)
+                if (lines.isNotEmpty()) read++
+                if (page.stopReason != null) { stop = page.stopReason; break }
+                if (page.found) { stop = "找到了「$wanted」"; break } // l10n:keep agent result
+                if (items.chars > COLLECT_CHARS) { stop = "内容太多，先停在这里"; break } // l10n:keep agent result
+                if (read > 1 && page.added == 0) {
+                    // l10n:keep agent screen result
+                    if (++misses >= 2) { stop = "没有读到更多文字，可能已经到底"; break }
+                } else misses = 0
+                // l10n:keep agent screen result
+                if (read >= pages) { stop = "达到页数上限（$pages 页）"; break }
+                if (cancelled(gen) || !allowed()) { stop = "本任务已暂停或停止"; break } // l10n:keep agent result
+                if (SystemClock.uptimeMillis() > deadline) { stop = "超时"; break } // l10n:keep agent result
+                val scrollSources = cap.windows.mapNotNull { it.packageName }.toSet()
+                if (!scrollSourcesAllowed(scrollSources)) {
+                    sourceDenied = true
+                    // l10n:keep agent screen result
+                    stop = "当前页面来源不允许滚动"
+                    break
+                }
+                // Gesture scroll: no node exists on a self-drawn page.
+                val area = Box(cap.screen.left, cap.screen.top + cap.screen.height / 5,
+                    cap.screen.right, cap.screen.bottom - cap.screen.height / 6)
+                val before = clock.count
+                val out = actuator.scroll(null, 0, false, area, cap.screen, PhoneAction.Direction.DOWN) {
+                    !cancelled(gen) && allowed() && scrollSourcesAllowed(scrollSources)
+                }
+                // l10n:keep agent screen result
+                if (!out.accepted) { stop = "系统没有接受滚动，无法确认是否到底"; break }
+                clock.settle(before, 1_200, 350, 3_000) { cancelled(gen) }
+                if (misses > 0) clock.pause(800) { cancelled(gen) }
+            } finally { cap.recycle() }
+        }
+        return CollectResult(items.list(), read, stop,
+            if (!sourceDenied && !cancelled(gen) && allowed()) observeQuiet() else null, readPackages.toSet())
     }
 
     // ---- actions ----------------------------------------------------------------------------------

@@ -35,6 +35,17 @@
 - **Minis 从来没有拿到小程序节点树**。它的优势是把「滚动截图 → 批量 OCR → 全页文本」做成了脚本自动化，42 屏全量采集；DSH 侧我做的 visualOnly 只解决「单屏截图 + 本地 OCR」，差距在**广度（自动滚动）和 OCR 质量（Tesseract chi_sim vs ML Kit）**，不在读取通道。
 - 可学的东西：给 DSH 的 `collect` 工具在 poorTree/visualOnly 页面改成「滚动 + 逐屏截图 + 文字拼接」，而不是按节点收集；必要时允许用 Tesseract 替代/补充 ML Kit。
 
+### 学会 Minis 优点：visualOnly 滚动批量采集（2026-11-21 17:40，已验证）
+- 需求：Minis 第一条对话靠 `capture.sh` 批量滚动截图 42 屏 + Tesseract OCR 拼 398 行文本；DSH 的 collect 以前在无节点页直接 `INVALID_TARGET`。
+- 实现（MainScreenDriver.kt）：
+  - `collect()` 分流：节点编号找不到且 `ReadCompat.relaxed && cap.visualOnly` 时，转入 `collectVisual()`；普通空列表仍按原逻辑报错。
+  - `collectVisual()`（新增私有方法）：每轮 `capture()` → `shooter.shoot(image=false, readLocalText=true)` 拿 `Shot.localText` 的纯行（`LocalOcrResult.Recognized.lines`）→ `CollectedItems.readPage()` 去重/until 匹配 → `actuator.scroll(null, ...)` 手势下滑 → 直到页数/字符/超时/连续 2 页无新增。
+  - 修正：collectVisual 内不能用 `unavailable(cap)` 判读不到（visualOnly 的 windows 为空会恒真），改只判 `cap.hiddenWindowTitle`（FLAG_SECURE 红线仍保留）。
+  - 安全门全部保留：`ocrAllowed()`、`denyPackages`、`scrollSourcesAllowed`、FLAG_SECURE、ownApp/protectedPage、OCR 脱敏。
+- 真机验证（京东小程序页，8 页上限）：`pages=6 stop=没有读到更多文字，可能已经到底 items=120`，11.7 秒。采到商品价格 ¥6999、配置「八核7 16G512G RTX3060」「165Hz高刷」、相似商品/销量/补贴等 120 条去重文本——达到 Minis capture.sh 的效果。
+- 已知不足：本地 ML Kit OCR 有错字/噪声（"8标压处理器"、"20FIt"、"く"），混入状态栏时间"17:38"；换成视觉模型读图或 Tesseract chi_sim 可改善。
+- 用法：A11yProbe `collect --es sid <sid> --ei id 0 --ei pages N`（id 传 0 或任意不存在的编号触发 visualOnly 分支）。
+
 ### Minis 对照实验（2026-11-21 16:56，纠正之前的错误结论）
 - 用户实测 Minis AI 对话能完整读小程序。我查源码 + 真机对照，纠正两个错误推断：
   1. 「窗口级缺失是无障碍 API 固有上限」错。Minis `MinisAccessibilityService.kt:121-132` 用的就是 getWindows()+rootInActiveWindow+节点 text，无 OCR/无 shell，API 和 DSH 一样。
