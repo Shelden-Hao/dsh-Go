@@ -182,7 +182,10 @@ internal class MainScreenDriver(private val service: PhoneA11yService, private v
         val cap = capture()
         try {
             val snap = publish(cap, detail)
-            val publicImage = image || automaticImage && snap.screen.poorTree
+            // ReadCompat visualOnly: 没有可读窗口但截图通道可用（小程序自绘页）。让截图与
+            // 本地 OCR 照常触发；节点树仍旧是空的，不伪造元素，也不影响按 id 点击的判定。
+            val poor = snap.screen.poorTree || (ReadCompat.relaxed && cap.visualOnly)
+            val publicImage = image || automaticImage && poor
             val text = StringBuilder(snap.screen.text)
             var bytes: ByteArray? = null
             var mime: String? = null
@@ -191,8 +194,8 @@ internal class MainScreenDriver(private val service: PhoneA11yService, private v
             var localText = shooter.localTextWithoutFrame()
             var formatted: LocalOcrVisual.Output? = null
             val epoch = localOcr.enabledEpoch()
-            val readLocal = snap.screen.poorTree && epoch != null && ocrAllowed(cap, snap, generation)
-            if (snap.screen.poorTree && epoch != null && !readLocal) {
+            val readLocal = poor && epoch != null && ocrAllowed(cap, snap, generation)
+            if (poor && epoch != null && !readLocal) {
                 localText = LocalOcrResult.Unavailable(LocalOcrResult.Reason.PRIVACY_UNVERIFIED)
             }
             if (publicImage || readLocal) {
@@ -207,7 +210,8 @@ internal class MainScreenDriver(private val service: PhoneA11yService, private v
                     // l10n:keep agent screen result
                     left < 900 -> text.append("\n提示：读屏用时过长，这次没有附截图。")
                     else -> {
-                        val window = if (cap.windows.size == 1) cap.windows[0] else null
+                        // 占位/无窗口时按窗口 id 截图会失败，走全屏截图。
+                        val window = if (cap.windows.size == 1 && !cap.visualOnly) cap.windows[0] else null
                         val secrets = secretFieldBounds(cap.windows)
                         val capturedTransitions = visual.transitions()
                         val shot = shooter.shoot(window, cap.screen, snap.screen.elements, secrets, minOf(left - 300, 3_000),
@@ -216,13 +220,13 @@ internal class MainScreenDriver(private val service: PhoneA11yService, private v
                             localTextPrivacyAllowed = ocrAllowed(cap, snap, generation),
                             localTextCancelled = { !ocrAllowed(cap, snap, generation) || localOcr.enabledEpoch() != epoch })
                         localText = when {
-                            snap.screen.poorTree && epoch == null -> shooter.localTextWithoutFrame()
-                            snap.screen.poorTree && !readLocal -> LocalOcrResult.Unavailable(LocalOcrResult.Reason.PRIVACY_UNVERIFIED)
+                            poor && epoch == null -> shooter.localTextWithoutFrame()
+                            poor && !readLocal -> LocalOcrResult.Unavailable(LocalOcrResult.Reason.PRIVACY_UNVERIFIED)
                             else -> shot.localText
                         }
-                        val current = snap.screen.poorTree && epoch != null && epoch == localOcr.enabledEpoch() &&
+                        val current = poor && epoch != null && epoch == localOcr.enabledEpoch() &&
                             verifyOcrContext(cap, snap, generation, start + OBSERVE_MS)
-                        val decoded = if (snap.screen.poorTree) shot.visualText() else null
+                        val decoded = if (poor) shot.visualText() else null
                         if (current && SystemClock.uptimeMillis() < start + OBSERVE_MS &&
                             epoch == localOcr.enabledEpoch() && ocrAllowed(cap, snap, generation)) formatted = decoded
                         val privateText = decoded?.sensitiveText == true
@@ -248,21 +252,29 @@ internal class MainScreenDriver(private val service: PhoneA11yService, private v
                     }
                 }
             }
-            if (snap.screen.poorTree) text.append("\n").append(formatted?.text ?: LocalOcrBoundary.message(localText))
+            if (poor) text.append("\n").append(formatted?.text ?: LocalOcrBoundary.message(localText))
             if (secure) clearFocusCandidate()
-            ScreenSnapshot(snap.id, text.toString(), snap.appLabel, snap.packageName, secure || snap.hidden, snap.screen.poorTree, bytes, mime,
+            ScreenSnapshot(snap.id, text.toString(), snap.appLabel, snap.packageName, secure || snap.hidden, poor, bytes, mime,
                 readPackages = snap.readPackages, focus = snap.focus.takeUnless { secure },
                 imageReadPackages = imageReadPackages)
         } finally { cap.recycle() }
     }
 
     private fun ocrAllowed(cap: Capture, snap: Snapshot, gen: Long): Boolean =
-        !cancelled(gen) && availability().ok && latest === snap && visual.scope(snap.id) != null &&
-            Build.VERSION.SDK_INT >= 34 && cap.windows.size == 1 && cap.visualComplete &&
+        !cancelled(gen) && availability().ok && latest === snap &&
+            // ReadCompat visualOnly 没有可视窗口，也就没有 per-app 视觉授权 scope；仍要求
+            // 其他全部安全条件（非安全窗、非敏感页、非 DSH 自己、无密码框等）。
+            (cap.visualOnly || visual.scope(snap.id) != null) &&
+            Build.VERSION.SDK_INT >= 34 && (cap.visualOnly || (cap.windows.size == 1 && cap.visualComplete)) &&
             cap.keyboardShown == false && !snap.ownApp && !snap.protectedPage && !snap.hidden &&
             !cap.truncated && !cap.partial && (ReadCompat.relaxed || !unavailable(cap)) &&
             secretFieldBounds(cap.windows).isEmpty() &&
-            PhoneControl.peek()?.policies()?.denyPackages?.let { snap.packageName != null && snap.packageName !in it } == true
+            // Bug 防护：visualOnly 时系统连窗口都不给，自然没有 packageName 可对照
+            // denyPackages；这一条在实验开关下跳过（其余安全门全部保留）。副作用：
+            // 若用户把微信加进 denyPackages，小程序页仍会 OCR，属于已知实验性放宽。
+            (cap.visualOnly || PhoneControl.peek()?.policies()?.denyPackages?.let {
+                snap.packageName != null && snap.packageName !in it
+            } == true)
 
     private fun verifyOcrContext(cap: Capture, snap: Snapshot, gen: Long, deadline: Long): Boolean {
         if (!ocrAllowed(cap, snap, gen)) return false
@@ -270,7 +282,10 @@ internal class MainScreenDriver(private val service: PhoneA11yService, private v
         if (left <= 0) return false
         val check = capture(minOf(CAPTURE_MS, left))
         return try { SystemClock.uptimeMillis() < deadline && ocrAllowed(check, snap, gen) &&
-            observation(check).reusableCoordinates(snap.observation) }
+            // Bug 防护：reusableCoordinates 要求 !unavailable 且 packageName 非空；visualOnly
+            // 两者都不可能满足，会导致 OCR 明明识别成功却不把文字交给模型。实验开关下
+            // 只跳过这条"上下文可复用"校验，前后两次 ocrAllowed 与截止时间仍照常检查。
+            (cap.visualOnly || observation(check).reusableCoordinates(snap.observation)) }
         finally { check.recycle() }
     }
 
@@ -1320,7 +1335,7 @@ internal class MainScreenDriver(private val service: PhoneA11yService, private v
     }
 
     private fun looksUnfinished(cap: Capture, previous: Snapshot?): Boolean =
-        cap.hiddenWindowTitle == null &&
+        cap.hiddenWindowTitle == null && !cap.visualOnly &&
             (cap.windows.isEmpty() || (ScreenFormat.textCount(cap.windows) < ScreenFormat.POOR_TREE && previous?.screen?.poorTree != true))
 
     /** Classifies metadata from the caller's successful refresh, without another platform read. */
@@ -1468,6 +1483,9 @@ internal class MainScreenDriver(private val service: PhoneA11yService, private v
             // l10n:keep agent screen result
             note("unreadable", "提示：当前无法读取这一屏${name}的有效内容，可能受敏感视图策略限制（Android 14 起密码、支付、验证页会被系统过滤）。读不到也点不了；能看图的模型可以 screen 加 image，否则请 handoff。")
         // l10n:keep agent screen result
+        } else if (cap.windows.isEmpty() && cap.visualOnly) {
+            // l10n:keep agent screen result
+            note("empty", "提示：这一屏没有可读元素，只能尝试截图识别文字；按元素点击不可用，需要时请 handoff。")
         } else if (cap.windows.isEmpty()) note("empty", "提示：读不到前台界面（可能是锁屏、安全页面或系统界面）。")
         val previous = latest?.takeIf { it.packageName == pkg }?.screen?.keys
         fun format(notes: List<Pair<String, String>>) = ScreenFormat.format(

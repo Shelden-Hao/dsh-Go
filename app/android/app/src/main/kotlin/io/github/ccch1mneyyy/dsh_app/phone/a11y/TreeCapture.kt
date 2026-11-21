@@ -57,6 +57,13 @@ internal class Capture(
     val typedTransitions: Long? = null,
     /** Delivered events for the same read; independent of the window-transition counter. */
     val typedEvents: Long? = null,
+    /**
+     * ReadCompat only: the system gave us no readable window at all (seen with in-app
+     * mini browsers / custom-rendered surfaces), but no FLAG_SECURE red line was hit
+     * and the full-screen screenshot channel is still usable. Lets the caller trigger
+     * local OCR without pretending we have a readable node tree or a visual scope.
+     */
+    val visualOnly: Boolean = false,
 ) {
     fun native(ref: Int): AccessibilityNodeInfo? = natives.getOrNull(ref)
 
@@ -209,6 +216,12 @@ internal object TreeCapture {
             @Suppress("DEPRECATION")
             if (Build.VERSION.SDK_INT < 33) all.orEmpty().forEach { runCatching { it.recycle() } }
         }
+        // Bug 防护：小程序等自绘窗口对无障碍完全不可见时 service.windows 里连 TYPE_APPLICATION
+        // 都没有，chosen 为空；普通路径会因 poorTree=false 连截图都不请求。仅在 ReadCompat
+        // 开启、且没撞 hiddenWindowTitle（FLAG_SECURE 红线）、且不是 DSH 自己/系统界面时，
+        // 标记成"只能看图"，让上层照常走截图 + 本地 OCR。读不到节点仍照实报告，不造假元素。
+        val visualOnly = ReadCompat.relaxed && chosen.isEmpty() && hidden == null &&
+            unreadable == null && !ownFront && !systemFront
         return Capture(
             windows = chosen,
             natives = st.natives,
@@ -228,6 +241,7 @@ internal object TreeCapture {
             imageWindows = imageWindows.toList(),
             typedTransitions = st.typedTransitions.takeIf { st.typedFresh },
             typedEvents = st.typedEvents.takeIf { st.typedFresh },
+            visualOnly = visualOnly,
         )
     }
 
