@@ -23,6 +23,14 @@
 3. 关键区分：小程序页 `secure=false`，全屏截图 129KB 正常产出，所以不是 FLAG_SECURE 红线，可以走 OCR。
 4. **最终验证通过**（2026-11-21 16:26，京东小程序商品页）：`poor=true`、`image=122721B`，输出 61 条本机文字区域，包括「该商品已下架」「戴尔(DELL)笔记本电脑 游匣G15 15.6英寸」「游戏本(八核7 16G512G RTX3060显卡…」「¥6999.00」「相似商品」等。之前微信聊天页仍可读。
 
+### 关闭弹窗后的验证（2026-11-21 16:36）
+- 之前 agent 没点进详情页，不是看不到，是 SafetyGate 把点商品卡片判成购买类操作（卡片带「立即购买」），两次确认都被取消。
+- 用 `adb shell input tap 1197 625` 点掉「该商品已下架」弹窗右侧关闭圈 → 弹窗消失，露出商品详情页。
+- 再 `screen image=true`：`poor=true`、`image=100289B`，读到完整详情：「¥6999」「已售4万+」「戴尔(DELL)笔记本电脑 游匣G15 15.6英寸」「游戏本(八核i7 16G 512G RTX3060显卡 165)」「8核标压处理器」「RTX3060电竞显卡」「165Hz高刷护眼屏」等。
+- 结论：读取能力已够，卡点是 agent 的购买确认策略（SafetyGate），不是读屏代码。
+- 准确率对比：本地 OCR 把「电竞显卡」读成「电克显卡」、「高刷」读成「高剧」、「八核i7」读成「八棱门」；多模态模型直接看 `image/jpeg` 明显更准。本地 OCR 只是纯文本模型兜底，不是必选。
+- 节点树为何救不了：小程序是**窗口级缺失**（`service.windows` 无 type=1 应用窗口、`rootInActiveWindow=null`），不是微信主界面那种「有窗口但空壳」。无障碍 API 无法强取未枚举的窗口；`isAccessibilityTool=true` 只影响敏感视图子树，对窗口级缺失无效；Shizuku/Shell 的 `uiautomator dump` 对 X5 自绘 H5 大概率仍是空壳。
+
 途中补的三道门（都在 `MainScreenDriver.kt`）：
 - `ocrAllowed()` 的 `denyPackages` 检查需要非空 packageName，visualOnly 没有 → 实验开关下跳过；
 - `verifyOcrContext()` 的 `reusableCoordinates()` 要求 `!unavailable` 且 packageName 非空，visualOnly 都不满足 → 实验开关下跳过这条上下文复用校验（前后两次 `ocrAllowed` 和截止时间照常检查）；
