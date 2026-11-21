@@ -181,13 +181,13 @@ object PhoneToolCatalog {
         Tool(
             COLLECT,
             // l10n:keep agent tool catalog
-            "只读：自动滚动列表收集全部条目（按文字去重），读长列表只用这一次。",
+            "只读：自动滚动列表收集全部条目（按文字去重），读长列表只用这一次。自绘页面（小程序等无障碍拿不到节点的页面）list 传 0，会改为逐屏截图+本机文字识别收集；这类页面常盖着弹窗，先用 screen 拿带坐标文字、tap_xy 关掉弹窗再收集，否则收到的是弹窗内容。",
             linkedMapOf(
                 "screen" to SCREEN_ID,
                 // l10n:keep agent tool catalog
-                "list" to int("列表的编号"),
+                "list" to int("列表的编号；自绘页面（小程序等无节点）传 0"),
                 // l10n:keep agent tool catalog
-                "max_pages" to int("最多翻几页（1–30），默认 10"),
+                "max_pages" to int("最多翻几页（1–40），默认 10"),
                 // l10n:keep agent tool catalog
                 "until" to str("出现这段文字就停"),
             ),

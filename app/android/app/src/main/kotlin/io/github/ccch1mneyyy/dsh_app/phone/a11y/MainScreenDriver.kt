@@ -930,7 +930,7 @@ internal class MainScreenDriver(private val service: PhoneA11yService, private v
     private fun collectVisual(maxPages: Int, until: String?, allowed: () -> Boolean,
                               canRead: (String?) -> Boolean, scrollSourcesAllowed: (Set<String>) -> Boolean,
                               gen: Long): CollectResult {
-        val pages = maxPages.coerceIn(1, 30)
+        val pages = maxPages.coerceIn(1, 40)
         val wanted = until?.trim()?.takeIf { it.isNotEmpty() }
         val deadline = SystemClock.uptimeMillis() + COLLECT_MS
         val items = CollectedItems()
@@ -982,9 +982,12 @@ internal class MainScreenDriver(private val service: PhoneA11yService, private v
                 if (page.stopReason != null) { stop = page.stopReason; break }
                 if (page.found) { stop = "找到了「$wanted」"; break } // l10n:keep agent result
                 if (items.chars > COLLECT_CHARS) { stop = "内容太多，先停在这里"; break } // l10n:keep agent result
-                if (read > 1 && page.added == 0) {
+                // 自绘页常把内容画在图里：懒加载、吸顶栏、商品卡轮播都会让相邻两屏的
+                // OCR 结果整屏重复，只凭两屏无新增就判"到底"会漏掉下方内容。Minis 的
+                // 同类采集固定滚满屏数，这里前 3 屏无条件继续，之后才允许判到底。
+                if (read > 2 && page.added == 0) {
                     // l10n:keep agent screen result
-                    if (++misses >= 2) { stop = "没有读到更多文字，可能已经到底"; break }
+                    if (++misses >= 3) { stop = "没有读到更多文字，可能已经到底"; break }
                 } else misses = 0
                 // l10n:keep agent screen result
                 if (read >= pages) { stop = "达到页数上限（$pages 页）"; break }

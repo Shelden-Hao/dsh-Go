@@ -46,6 +46,63 @@
 - 已知不足：本地 ML Kit OCR 有错字/噪声（"8标压处理器"、"20FIt"、"く"），混入状态栏时间"17:38"；换成视觉模型读图或 Tesseract chi_sim 可改善。
 - 用法：A11yProbe `collect --es sid <sid> --ei id 0 --ei pages N`（id 传 0 或任意不存在的编号触发 visualOnly 分支）。
 
+### 更正：Minis 用的是同一个纯文本模型，靠 42 屏 OCR 而不是视觉（2026-11-21 18:20）
+
+上一轮"Minis 靠视觉模型读图"的结论**是错的**，这一节把它纠正掉。
+
+**铁证（App 内直接读到，不是推断）**
+
+- 那条会话顶部的模型标签：`易华 KCoder · KCoder-Claude · 易华·DeepSeek-V4-Flash`
+  —— 和 DSH 里配的是**同一个渠道、同一个纯文本模型**，`input: [text]` 没有视觉能力。
+- Minis 自己在会话汇总里写：
+  > "读完了。那条京东小程序卡片里展示的机器，**我逐页截了 42 屏做了 OCR**，配置和型号都出来了，然后对着戴尔官方手册核了硬盘位。戴尔 游匣 G15 5510-R1866B（商品编号 1…"
+
+**它到底怎么做的（161 条工具轨迹里的实际序列）**
+
+1. `android-a11y-cli ui screenshot` —— 无障碍截图，图片落到 PRoot 沙箱
+   （`minis://attachments/screenshots/a11y_*.png`）
+2. 主模型收到的不是像素，而是一段**占位符**，里面带着沙箱路径。
+   源码 `VisionGroupResolver.noVisionImagePlaceholder` 的注释写得非常直白：
+   > `shell_execute` is exposed unconditionally and runs in the SAME PRoot Alpine sandbox …
+   > so a model holding the path can run `file`, `identify`, `exiftool`, Pillow, **an OCR pass**
+   也就是说：**模型看不到图，但它拿到了文件路径，可以自己跑 OCR。**
+3. 模型自己决定装 OCR：`apk add tesseract-ocr tesseract-ocr-data-chi_sim`
+4. 用 Editor 写 `capture.sh`（421 B）：循环 `input swipe` + `screencap`，**滚满 42 屏**
+5. `tesseract` 逐张 OCR，拼成 `pages.txt`（398 行）
+6. 从 OCR 文本里抓**商品编号 100016263861**，反查型号 G15 5510-R1866B
+7. **联网**核戴尔官方手册 + iFixit（M.2 双槽、X8MY9 支架），最后 `memory_write`
+
+**关键方法论（这才是要学的）**
+
+它并不"读懂整页"。它做的是：**截图 → 转成文字 → 抓一个锚点（型号/编号）→ 联网把规格补全**。
+商品详情页的完整参数根本不是从屏幕上读出来的，是拿编号去官方手册查出来的。
+
+**DSH 的真实差距（逐条对应到代码）**
+
+| 环节 | Minis | DSH 现状 |
+|---|---|---|
+| 截图 | a11y-cli | 有：`screen image=true` |
+| 图→文字 | 沙箱 tesseract | **更强**：内置 ML Kit，且 `visualText()` 带 `box`/`point` 坐标 |
+| 批量滚动 | 模型写脚本滚 42 屏 | `collectVisual` 写死流程，且 6 屏就判"到底" |
+| 模型知不知道有这条路 | 占位符明确告知 + shell 无条件可用 | **不知道**：`collect` 描述没提自绘页，`list` 写着必填编号 |
+| 谁做决策 | 模型每一步自己定 | 黑盒一次调用，中间没有决策点 |
+| 联网补全 | 有 | 有 |
+
+所以差距不在模型能力、不在 OCR 引擎，而在两个地方：**入口没告诉模型**、**停止条件太早**。
+
+**本轮改动**
+
+1. `PhoneToolCatalog.collect` 描述补上自绘页语义：`list` 传 0 走逐屏识别；有弹窗时先 `screen` 拿坐标、`tap_xy` 关掉再采集。
+2. `collect.list` 参数说明补"自绘页面（小程序等无节点）传 0"。
+3. 页数上限 30 → 40（对齐 Minis 的 42 屏量级）。
+4. `collectVisual` 停止条件：前 3 屏无条件继续，之后连续 3 屏无新增才判到底
+   （原来 2 屏就停，自绘页的懒加载/吸顶栏会让相邻两屏 OCR 整屏重复，极易误判到底）。
+
+**仍未解决**：纯文本模型无法定位**没有文字的图标**（弹窗右上角的 ×）。OCR 只认字，
+`×` 不在文字里，模型拿不到它的坐标。这一点 Minis 也没解决——它没关弹窗，
+而是把弹窗文字一并 OCR 后用编号联网绕过去。要真正点 × 只有两条路：
+视觉模型，或者对"关闭/确定/我知道了"这类**有文字**的按钮用 `tap_xy`。
+
 ### Minis 对照实验（2026-11-21 16:56，纠正之前的错误结论）
 - 用户实测 Minis AI 对话能完整读小程序。我查源码 + 真机对照，纠正两个错误推断：
   1. 「窗口级缺失是无障碍 API 固有上限」错。Minis `MinisAccessibilityService.kt:121-132` 用的就是 getWindows()+rootInActiveWindow+节点 text，无 OCR/无 shell，API 和 DSH 一样。

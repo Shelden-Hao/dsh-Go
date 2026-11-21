@@ -906,7 +906,7 @@ class PhoneCore(
         }
         // l10n:keep agent tool result
         val list = a.int("list") ?: return Out("collect 需要 list（列表编号）。", error = true)
-        val pages = (a.int("max_pages") ?: 10).coerceIn(1, 30)
+        val pages = (a.int("max_pages") ?: 10).coerceIn(1, 40)
         val summary = ui.get("phone_log_collect", "收集 %1\$s#%2\$d", sid.toString(), list) // l10n:keep test default
         val driver = when (val d = driverFor(which, owner)) {
             is Either.Left -> return Out(d.value, error = true, summary = summary, decision = "unavailable")
